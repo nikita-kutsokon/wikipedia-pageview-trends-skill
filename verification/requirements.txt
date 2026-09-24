@@ -1,0 +1,4 @@
+# Dependencies for the live verification harness only.
+# Kept separate from the skill's own runtime deps (skills/wikipedia-pageview-trends/pyproject.toml)
+# since end users of the skill never need a Gemini SDK.
+google-genai>=0.3,<1

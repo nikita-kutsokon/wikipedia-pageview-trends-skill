@@ -1,0 +1,10 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+skills/wikipedia-pageview-trends/.cache/
+verification/run_examples_out/
+wikitrends-out/
+.env
+.omc/
