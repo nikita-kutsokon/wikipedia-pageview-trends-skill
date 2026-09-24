@@ -1,8 +1,9 @@
 """Check that every number in a transcript's final prose answer traces back
-to a field the tool actually returned (--json output captured in that same
-transcript's tool-result blocks), per Principle 2 ("every claim traces to
-fetched data" — a number that's merely present in --json but misquoted in
-prose is still a fabrication risk this check exists to catch).
+to a number the tool actually returned in one of that transcript's tool-
+result blocks (plain-text CLI output and/or --json — SKILL.md tells the
+model it may read either), per Principle 2 ("every claim traces to fetched
+data" — a number the model states but the tool never produced is a
+fabrication risk this check exists to catch).
 
 Usage:
     python verification/check_numeric_consistency.py verification/transcript_*.md
@@ -10,7 +11,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 
@@ -36,28 +36,14 @@ def _extract_numbers(text: str) -> list[float]:
     return out
 
 
-def _extract_json_numbers(transcript: str) -> list[float]:
+def _extract_tool_result_numbers(transcript: str) -> list[float]:
+    """Every number the tool itself produced, across all tool-result blocks
+    in the transcript — whether the model asked for plain text or --json.
+    """
     numbers = []
-    for match in re.finditer(r"```\n(\{.*?\})\n```", transcript, re.DOTALL):
-        try:
-            payload = json.loads(match.group(1))
-        except json.JSONDecodeError:
-            continue
-        numbers.extend(_walk_numbers(payload))
+    for match in re.finditer(r"\*\*tool result:\*\*\n```\n(.*?)\n```", transcript, re.DOTALL):
+        numbers.extend(_extract_numbers(match.group(1)))
     return numbers
-
-
-def _walk_numbers(obj) -> list[float]:
-    out = []
-    if isinstance(obj, dict):
-        for v in obj.values():
-            out.extend(_walk_numbers(v))
-    elif isinstance(obj, list):
-        for v in obj:
-            out.extend(_walk_numbers(v))
-    elif isinstance(obj, (int, float)) and not isinstance(obj, bool):
-        out.append(float(obj))
-    return out
 
 
 def _rounds_to(candidate: float, target: float) -> bool:
@@ -72,12 +58,12 @@ def check_transcript(path: str) -> list[str]:
     prose = final_answer_match.group(1) if final_answer_match else text
 
     prose_numbers = _extract_numbers(prose)
-    json_numbers = _extract_json_numbers(text)
+    tool_numbers = _extract_tool_result_numbers(text)
 
     failures = []
     for n in prose_numbers:
-        if not any(_rounds_to(n, j) or _rounds_to(n, -j) for j in json_numbers):
-            failures.append(f"{path}: prose number {n} not found in any --json output field")
+        if not any(_rounds_to(n, j) or _rounds_to(n, -j) for j in tool_numbers):
+            failures.append(f"{path}: prose number {n} not found in any tool-result output")
     return failures
 
 

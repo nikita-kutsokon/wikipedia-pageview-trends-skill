@@ -13,8 +13,6 @@ Usage:
     GOOGLE_API_KEY=... python verification/verify_with_gemini.py
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re
@@ -59,6 +57,9 @@ def _skill_md_body() -> str:
     return parts[2].strip() if len(parts) >= 3 else text
 
 
+_TOOL_CALL_LOG: list[tuple[str, str]] = []
+
+
 def run_shell(command: str) -> str:
     """Execute a wikitrends invocation. The ONLY tool the model gets.
 
@@ -71,19 +72,54 @@ def run_shell(command: str) -> str:
     try:
         argv = shlex.split(command)
     except ValueError as exc:
-        return f"error: could not parse command: {exc}"
+        result = f"error: could not parse command: {exc}"
+        _TOOL_CALL_LOG.append((command, result))
+        return result
     if not argv or argv[0] != "wikitrends":
-        return "error: only 'wikitrends ...' commands are permitted through this tool"
+        result = "error: only 'wikitrends ...' commands are permitted through this tool"
+        _TOOL_CALL_LOG.append((command, result))
+        return result
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=120)
+        result = f"exit_code={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     except subprocess.TimeoutExpired:
-        return "error: command timed out after 120s"
-    return f"exit_code={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        result = "error: command timed out after 120s"
+    _TOOL_CALL_LOG.append((command, result))
+    return result
+
+
+def _send_with_retry(chat, query: str, max_attempts: int = 5):
+    """Retry on transient 503/429 from the API itself (observed live: the
+    free tier's 5-req/min cap and transient model-unavailable both happen in
+    practice), honoring the API's own suggested retry delay when present.
+    """
+    import re
+    import time
+
+    from google.genai import errors
+
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return chat.send_message(query)
+        except errors.ServerError as exc:
+            last_exc = exc
+            delay = 5 * (attempt + 1)
+        except errors.ClientError as exc:
+            last_exc = exc
+            match = re.search(r"retryDelay['\"]?:\s*['\"]?(\d+)", str(exc))
+            delay = int(match.group(1)) + 2 if match else 20 * (attempt + 1)
+        print(f"  (retrying after {delay}s: {last_exc})", file=sys.stderr)
+        import time as _t
+
+        _t.sleep(delay)
+    raise last_exc
 
 
 def _run_one_query(client, model_name: str, system_prompt: str, query: str):
     from google.genai import types
 
+    _TOOL_CALL_LOG.clear()
     chat = client.chats.create(
         model=model_name,
         config=types.GenerateContentConfig(
@@ -91,19 +127,12 @@ def _run_one_query(client, model_name: str, system_prompt: str, query: str):
             tools=[run_shell],
         ),
     )
-    response = chat.send_message(query)
+    response = _send_with_retry(chat, query)
+
     transcript_lines = [f"**User:** {query}\n"]
-    for turn in chat.get_history():
-        role = turn.role
-        for part in turn.parts:
-            if getattr(part, "function_call", None):
-                fc = part.function_call
-                transcript_lines.append(f"**{role} (tool call):** `{fc.name}({dict(fc.args)})`")
-            elif getattr(part, "function_response", None):
-                fr = part.function_response
-                transcript_lines.append(f"**{role} (tool result):**\n```\n{fr.response}\n```")
-            elif getattr(part, "text", None):
-                transcript_lines.append(f"**{role}:** {part.text}")
+    for command, result in _TOOL_CALL_LOG:
+        transcript_lines.append(f"**model (tool call):** `run_shell({command!r})`")
+        transcript_lines.append(f"**tool result:**\n```\n{result}\n```")
     transcript_lines.append(f"\n**Final answer:**\n{response.text}")
     return response.text, "\n\n".join(transcript_lines)
 
@@ -117,7 +146,7 @@ def main() -> int:
     from google import genai
 
     client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     system_prompt = _skill_md_body()
 
     for slug, query in QUERIES:
